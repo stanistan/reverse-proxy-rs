@@ -4,3 +4,6 @@ version = "0.1.0"
 authors = ["Stan Rozenraukh <stan@stanistan.com>"]
 
 [dependencies]
+futures = "0.1.4"
+hyper = "0.11.25"
+url = "1.4.0"
