@@ -2,7 +2,7 @@ extern crate futures;
 extern crate hyper;
 extern crate url;
 
-use futures::future::Future;
+use futures::future::{Future, FutureResult};
 use hyper::header::ContentLength;
 use hyper::server::{Http, Request, Response, Service};
 use hyper::{Method, StatusCode};
@@ -14,6 +14,39 @@ enum ProxyError {
     InvalidUrl { url: String },
     Wat, // fixme
 }
+
+struct Log<S> {
+    wrapped: S
+}
+
+impl<S> Service for Log<S> where S: Service<Request=Request, Response=Response, Error=hyper::Error> {
+    type Request = S::Request;
+    type Response = S::Response;
+    type Error = S::Error;
+
+    type Future = futures::Then<
+        S::Future,
+        FutureResult<S::Response, S::Error>,
+        FnOnce(Result<S::Response, S::Error>) -> FutureResult<Self::Response, Self::Error>
+    >;
+
+
+    fn call(&self, r: Self::Request) -> Self::Future {
+        self.wrapped.call(r).then(|re| {
+            let request_path = "";
+            match re {
+                Ok(ref response) => {
+                    println!("OK  {} {}", request_path, response.status().as_u16());
+                },
+                Err(ref e) => {
+                    println!("ERR {} {:?}", request_path, e);
+                }
+            };
+            futures::future::result(re)
+        })
+    }
+}
+
 
 struct ReverseProxy;
 
@@ -63,6 +96,6 @@ fn get_target_url(request: &Request) -> Result<Url, ProxyError> {
 
 fn main() {
     let addr = "127.0.0.1:3000".parse().unwrap();
-    let server = Http::new().bind(&addr, || Ok(ReverseProxy)).unwrap();
+    let server = Http::new().bind(&addr, || Ok(Log { wrapped: ReverseProxy })).unwrap();
     server.run().unwrap();
 }
