@@ -1,5 +1,6 @@
 extern crate futures;
 extern crate hyper;
+extern crate net2;
 extern crate tokio_core;
 extern crate url;
 
@@ -8,14 +9,20 @@ use futures::stream::Stream;
 use hyper::client::HttpConnector;
 use hyper::header::Location;
 use hyper::server::{Http, Response, Service};
-use hyper::{Client, Method, Request, StatusCode, Uri};
+use hyper::{Chunk, Client, Method, Request, StatusCode, Uri};
+use net2::TcpBuilder;
+use net2::unix::UnixTcpBuilderExt;
+use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::thread;
+use tokio_core::net::TcpListener;
 use tokio_core::reactor::Core;
 use url::{form_urlencoded, Url};
 
 static QUERY_PARAM: &'static str = "q";
 static MAX_NUM_RETRIES: usize = 3;
+static PROXY_THREADS: usize = 4;
 
 /// Describes the different states that the proxy
 /// service can be in. Each of the variants will contain
@@ -154,33 +161,34 @@ fn get_target_uri(request: &Request) -> Result<Uri, ProxyError> {
     Uri::from_str(url.as_str()).map_err(|_| ProxyError::InvalidUrl)
 }
 
-fn main() {
-    let mut core = Core::new().expect("error: no core for you");
-    let addr = "127.0.0.1:3000".parse().unwrap();
-
+fn serve(worker_id: usize, addr: SocketAddr) {
+    let mut core = Core::new().expect(&format!("thread-{}: error: no core for you", worker_id));
     let server_handle = core.handle();
     let client_handle = core.handle();
 
-    let serve = Http::new()
-        .serve_addr_handle(&addr, &server_handle, move || {
-            Ok(ReverseProxy {
-                client: Arc::new(Client::configure().build(&client_handle)),
-            })
-        })
-        .unwrap();
+    let tcp = TcpBuilder::new_v4().unwrap()
+        .reuse_address(true).unwrap()
+        .reuse_port(true).unwrap()
+        .bind(addr).unwrap()
+        .listen(128).unwrap();
 
-    let h2 = server_handle.clone();
-    server_handle.spawn(
-        serve
-            .for_each(move |conn| {
-                h2.spawn(
-                    conn.map(|_| ())
-                        .map_err(|err| println!("serve err: {:?}", err)),
-                );
-                Ok(())
-            })
-            .map_err(|_| ()),
-    );
+    let listener = TcpListener::from_listener(tcp, &addr, &server_handle).unwrap();
+    let http: Http<Chunk> = Http::new();
+    let client = Arc::new(Client::configure().build(&client_handle));
 
-    core.run(futures::future::empty::<(), ()>()).unwrap();
+    core.run(listener.incoming().for_each(|(data, _addr)| {
+        http.serve_connection(data, ReverseProxy{client: client.clone()})
+            .map_err(|_| std::io::Error::last_os_error()) // FIXME wat
+    })).unwrap();
+}
+
+fn main() {
+    let addr: SocketAddr = "127.0.0.1:3000".parse().unwrap();
+
+    for worker_id in 1..PROXY_THREADS {
+        let addr = addr.clone();
+        thread::spawn(move || serve(worker_id, addr));
+    }
+
+    serve(0, addr);
 }
