@@ -14,11 +14,6 @@ use std::sync::Arc;
 use tokio_core::reactor::{Core, Handle};
 use url::{form_urlencoded, Url};
 
-struct Context {
-    request_path: String,
-    // url: Option<Url>,
-}
-
 #[derive(Debug)]
 enum ProxyError {
     NoQueryParameter,
@@ -39,26 +34,19 @@ impl Service for ReverseProxy {
 
     fn call(&self, req: Request) -> Self::Future {
         let client = self.client.clone();
-        Box::new(
-            noop(req)
-                .and_then(|r| proxy_incoming_request(r, client))
+        let proxy_request = proxy_incoming_request(req, client)
                 .and_then(proxy_outgoing_request)
                 .or_else(|err| {
                     println!("fuck: {:?}", err);
                     let response = Response::new().with_status(StatusCode::InternalServerError);
                     Ok(response)
-                }),
-        )
+                });
+        Box::new(proxy_request)
     }
 }
 
-// FIXME these should have better type names
-type HmmFuture = Box<Future<Item = Request, Error = hyper::Error>>;
 type BoxFuture = Box<Future<Item = Response, Error = hyper::Error>>;
 
-fn noop(request: Request) -> HmmFuture {
-    return Box::new(futures::future::ok(request));
-}
 
 // start handling an incoming https request from a client, translate it into an outgoing upstream
 // http(s) request, and return a future for that request
