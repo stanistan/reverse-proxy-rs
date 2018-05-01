@@ -33,18 +33,16 @@ enum ProxyRequestState {
     },
 }
 
-type ProxyRequestFuture = Box<Future<Item = ProxyRequestState, Error = hyper::Error>>;
-
 fn next_proxy_request_state(
     client: Arc<Client<HttpConnector>>,
     state: ProxyRequestState,
-) -> ProxyRequestFuture {
+) -> Box<Future<Item = (Request, Response), Error = hyper::Error>> {
     use ProxyRequestState::*;
 
     match state {
         Done { request, response } => {
             println!("{} {}", request.uri(), response.status().as_u16());
-            Box::new(futures::future::ok(Done { request, response }))
+            Box::new(futures::future::ok((request, response)))
         }
         Invalid { request, err } => {
             println!("proxy_error: {}: {:?}", request.uri(), err);
@@ -120,8 +118,6 @@ enum ProxyError {
     BadRedirect,
 }
 
-type BoxFuture = Box<Future<Item = Response, Error = hyper::Error>>;
-
 struct ReverseProxy {
     client: Arc<Client<HttpConnector>>,
 }
@@ -130,19 +126,12 @@ impl Service for ReverseProxy {
     type Request = Request;
     type Response = Response;
     type Error = hyper::Error;
-    type Future = BoxFuture;
+    type Future = Box<Future<Item = Response, Error = hyper::Error>>;
 
     fn call(&self, request: Request) -> Self::Future {
         let client = self.client.clone();
-        let work = next_proxy_request_state(client, ProxyRequestState::Incoming { request }).map(
-            |state| {
-                if let ProxyRequestState::Done { request: _ , response } = state {
-                    response
-                } else {
-                    panic!("not a terminal state")
-                }
-            },
-        );
+        let work = next_proxy_request_state(client, ProxyRequestState::Incoming { request })
+            .map(|(_, response)| response);
         Box::new(work)
     }
 }
