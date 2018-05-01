@@ -53,18 +53,12 @@ fn next_proxy_request_state(
         }
         Incoming { request } => next_proxy_request_state(
             client,
-            match get_target_url(&request) {
+            match get_target_uri(&request) {
                 Err(err) => Invalid { request, err },
-                Ok(url) => match Uri::from_str(url.as_str()) {
-                    Ok(to) => Proxy {
-                        request,
-                        to,
-                        retries_remaining: 3,
-                    },
-                    Err(_) => Invalid {
-                        request,
-                        err: ProxyError::InvalidUrl,
-                    },
+                Ok(to) => Proxy {
+                    request,
+                    to,
+                    retries_remaining: 3,
                 },
             },
         ),
@@ -90,7 +84,7 @@ fn next_proxy_request_state(
                     next_proxy_request_state(
                         client,
                         match response.status().is_redirection() {
-                            true => match get_redirect_url(&response) {
+                            true => match get_redirect_uri(&response) {
                                 Some(to) => Proxy {
                                     request,
                                     to,
@@ -136,22 +130,21 @@ impl Service for ReverseProxy {
     }
 }
 
-fn get_redirect_url(response: &Response) -> Option<Uri> {
+/// Attempt to parse out the redirect uri from the proxy response.
+fn get_redirect_uri(response: &Response) -> Option<Uri> {
     let location: Option<&Location> = response.headers().get();
     location.and_then(|l| Uri::from_str(&*l).ok())
 }
 
-fn get_target_url(request: &Request) -> Result<Url, ProxyError> {
-    let query = match request.query() {
-        Some(query_str) => query_str,
-        None => return Err(ProxyError::NoQueryParameter),
-    };
-
-    let param = form_urlencoded::parse(query.as_bytes()).find(|(k, _)| k == "q");
-    match param {
-        None => Err(ProxyError::NoQueryParameter),
-        Some((_, v)) => Url::parse(&v).map_err(|_| ProxyError::InvalidUrl),
-    }
+/// Attempt to extract the proxy target's URI from the original
+/// incoming request to the service.
+fn get_target_uri(request: &Request) -> Result<Uri, ProxyError> {
+    let query = request.query().ok_or_else(|| ProxyError::NoQueryParameter)?;
+    let (_, query_param) = form_urlencoded::parse(query.as_bytes())
+        .find(|(k, _)| k == "q")
+        .ok_or_else(|| ProxyError::NoQueryParameter)?;
+    let url = Url::parse(&query_param).map_err(|_| ProxyError::InvalidUrl)?;
+    Uri::from_str(url.as_str()).map_err(|_| ProxyError::InvalidUrl)
 }
 
 fn main() {
