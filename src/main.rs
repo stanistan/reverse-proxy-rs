@@ -14,6 +14,12 @@ use std::sync::Arc;
 use tokio_core::reactor::Core;
 use url::{form_urlencoded, Url};
 
+static QUERY_PARAM: &'static str = "q";
+static MAX_NUM_RETRIES: usize = 3;
+
+/// Describes the different states that the proxy
+/// service can be in. Each of the variants will contain
+/// the initial request so we can do tracing/logging/debugging.
 enum ProxyRequestState {
     Incoming {
         request: Request,
@@ -33,73 +39,72 @@ enum ProxyRequestState {
     },
 }
 
-fn next_proxy_request_state(
-    client: Arc<Client<HttpConnector>>,
-    state: ProxyRequestState,
-) -> Box<Future<Item = (Request, Response), Error = hyper::Error>> {
-    use ProxyRequestState::*;
+impl ProxyRequestState {
+    fn next(
+        self,
+        client: Arc<Client<HttpConnector>>,
+    ) -> Box<Future<Item = (Request, Response), Error = hyper::Error>> {
+        use ProxyRequestState::*;
 
-    match state {
-        Done { request, response } => {
-            println!("{} {}", request.uri(), response.status().as_u16());
-            Box::new(futures::future::ok((request, response)))
-        }
-        Invalid { request, err } => {
-            println!("proxy_error: {}: {:?}", request.uri(), err);
-            let mut response = Response::new();
-            response.set_status(StatusCode::BadRequest);
-            response.set_body(format!("{:?}", err));
-            next_proxy_request_state(client, Done { request, response })
-        }
-        Incoming { request } => next_proxy_request_state(
-            client,
-            match get_target_uri(&request) {
-                Err(err) => Invalid { request, err },
-                Ok(to) => Proxy {
-                    request,
-                    to,
-                    retries_remaining: 3,
+        match self {
+            Done { request, response } => {
+                println!("{} {}", request.uri(), response.status().as_u16());
+                Box::new(futures::future::ok((request, response)))
+            }
+            Invalid { request, err } => {
+                println!("proxy_error: {}: {:?}", request.uri(), err);
+                let mut response = Response::new();
+                response.set_status(StatusCode::BadRequest);
+                response.set_body(format!("{:?}", err));
+                ProxyRequestState::next(Done { request, response }, client)
+            }
+            Incoming { request } => ProxyRequestState::next(
+                match get_target_uri(&request) {
+                    Err(err) => Invalid { request, err },
+                    Ok(to) => Proxy {
+                        request,
+                        to,
+                        retries_remaining: MAX_NUM_RETRIES,
+                    },
                 },
-            },
-        ),
-        Proxy {
-            request,
-            to: _,
-            retries_remaining: 0,
-        } => next_proxy_request_state(
-            client,
-            Invalid {
-                request: request,
-                err: ProxyError::TooManyRedirects,
-            },
-        ),
-        Proxy {
-            request,
-            to,
-            retries_remaining,
-        } => {
-            let work = client
-                .request(Request::new(Method::Get, to))
-                .and_then(move |response| {
-                    next_proxy_request_state(
-                        client,
-                        match response.status().is_redirection() {
-                            true => match get_redirect_uri(&response) {
-                                Some(to) => Proxy {
-                                    request,
-                                    to,
-                                    retries_remaining: retries_remaining - 1,
+                client,
+            ),
+            Proxy {
+                request,
+                to: _,
+                retries_remaining: 0,
+            } => ProxyRequestState::next(
+                Invalid {
+                    request: request,
+                    err: ProxyError::TooManyRedirects,
+                },
+                client,
+            ),
+            Proxy {
+                request,
+                to,
+                retries_remaining,
+            } => {
+                let work = client.request(Request::new(Method::Get, to)).and_then(
+                    move |response| {
+                        ProxyRequestState::next(
+                            match response.status().is_redirection() {
+                                true => match get_redirect_uri(&response) {
+                                    Ok(to) => Proxy {
+                                        request,
+                                        to,
+                                        retries_remaining: retries_remaining - 1,
+                                    },
+                                    Err(err) => Invalid { request, err },
                                 },
-                                _ => Invalid {
-                                    request,
-                                    err: ProxyError::BadRedirect,
-                                },
+                                _ => Done { request, response },
                             },
-                            _ => Done { request, response },
-                        },
-                    )
-                });
-            Box::new(work)
+                            client,
+                        )
+                    },
+                );
+                Box::new(work)
+            }
         }
     }
 }
@@ -123,17 +128,19 @@ impl Service for ReverseProxy {
     type Future = Box<Future<Item = Response, Error = hyper::Error>>;
 
     fn call(&self, request: Request) -> Self::Future {
-        let client = self.client.clone();
-        let work = next_proxy_request_state(client, ProxyRequestState::Incoming { request })
+        let work = ProxyRequestState::Incoming { request }
+            .next(self.client.clone())
             .map(|(_, response)| response);
         Box::new(work)
     }
 }
 
 /// Attempt to parse out the redirect uri from the proxy response.
-fn get_redirect_uri(response: &Response) -> Option<Uri> {
+fn get_redirect_uri(response: &Response) -> Result<Uri, ProxyError> {
     let location: Option<&Location> = response.headers().get();
-    location.and_then(|l| Uri::from_str(&*l).ok())
+    location
+        .and_then(|l| Uri::from_str(&*l).ok())
+        .ok_or_else(|| ProxyError::BadRedirect)
 }
 
 /// Attempt to extract the proxy target's URI from the original
@@ -141,7 +148,7 @@ fn get_redirect_uri(response: &Response) -> Option<Uri> {
 fn get_target_uri(request: &Request) -> Result<Uri, ProxyError> {
     let query = request.query().ok_or_else(|| ProxyError::NoQueryParameter)?;
     let (_, query_param) = form_urlencoded::parse(query.as_bytes())
-        .find(|(k, _)| k == "q")
+        .find(|(k, _)| k == QUERY_PARAM)
         .ok_or_else(|| ProxyError::NoQueryParameter)?;
     let url = Url::parse(&query_param).map_err(|_| ProxyError::InvalidUrl)?;
     Uri::from_str(url.as_str()).map_err(|_| ProxyError::InvalidUrl)
