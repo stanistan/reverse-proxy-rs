@@ -1,10 +1,12 @@
 #![allow(dead_code, unused_imports, unused_variables)]
+extern crate tokio_core;
 extern crate futures;
 extern crate hyper;
 extern crate url;
 
-use futures::future::{Future, FutureResult};
-use hyper::header::ContentLength;
+use tokio_core::reactor::{Core, Handle};
+use futures::future::{AndThen, Future, FutureResult, OrElse};
+use hyper::header::{ContentLength, Headers};
 use hyper::client::HttpConnector;
 use hyper::server::{Http, Response, Service};
 use hyper::{Client, Method, Request, StatusCode, Uri};
@@ -31,10 +33,17 @@ impl Service for ReverseProxy {
     type Response = Response;
     type Error = hyper::Error;
 
-    type Future = Box<Future<Item = Self::Response, Error = Self::Error>>;
+    type Future = BoxFuture;
 
     fn call(&self, req: Request) -> Self::Future {
-        proxy_incoming_request(&req, &self.client)
+        Box::new(proxy_incoming_request(&req, &self.client)
+            .and_then(proxy_outgoing_request)
+            .or_else(|err| {
+                println!("fuck: {:?}", err);
+                let response = Response::new()
+                    .with_status(StatusCode::InternalServerError);
+                Ok(response)
+            }))
     }
 }
 
@@ -62,14 +71,20 @@ fn proxy_incoming_request(request: &Request, client: &Client<HttpConnector>) -> 
         Ok(url) => url
     };
 
-    Box::new(client.request(Request::new(Method::Get, Uri::from_str(&url.as_str()).expect("fuck this"))))
+    let request = Request::new(Method::Get, Uri::from_str(&url.as_str()).expect("fuck this"));
+    println!("proxy_incoming_request: {:?}", request);
+    Box::new(client.request(request))
 }
 
 // handle a response from an upstream host and, if it's valid, return a future that transfers data
 // from the upstream request back to the client (with appropriate HTTP headers)
-fn proxy_outgoing_request() -> BoxFuture {
-    // FIXME: do something
-    unimplemented!()
+fn proxy_outgoing_request(proxy_response: Response) -> BoxFuture {
+    if proxy_response.status().is_redirection() {
+        unimplemented!()
+    }
+    println!("proxy_outgoing_request: {:?}", proxy_response);
+
+    Box::new(futures::future::ok(proxy_response.with_headers(Headers::new())))
 }
 
 
@@ -86,14 +101,18 @@ fn get_target_url(request: &Request) -> Result<Url, ProxyError> {
     }
 }
 
-fn main() {
-
-    /*
-    let addr = "127.0.0.1:3000".parse().unwrap();
+fn build_proxy_service() -> ReverseProxy {
+    let core = Core::new().expect("error: no core for you");
     let client = Client::configure()
-    let server = Http::new().bind(&addr, move || Ok(ReverseProxy {
-        client
-    })).unwrap();
+        .build(&core.handle());
+
+    ReverseProxy { client }
+}
+
+fn main() {
+    let addr = "127.0.0.1:3000".parse().unwrap();
+    let server = Http::new()
+        .bind(&addr, || Ok(build_proxy_service()))
+        .unwrap();
     server.run().unwrap();
-    */
 }
