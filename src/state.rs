@@ -52,7 +52,8 @@ fn default_headers() -> header::Headers {
             XFrameOptions("deny".to_owned()),
             XXSSProtection("1; mode=block".to_owned()),
             XContentTypeOptions("nosniff".to_owned()),
-            ContentSecurityPolicy("default-src 'none'; img-src data:; style-src 'unsafe-inline'".to_owned()),
+            ContentSecurityPolicy("default-src 'none'; img-src data:; style-src 'unsafe-inline'"
+                                  .to_owned()),
             StrictTransportSecurity("max-age=31536000; includeSubDomains".to_owned())
         ],
         if_present [ ],
@@ -76,8 +77,11 @@ fn build_proxy_request(request: &Request, to: Uri, opts: &EnvOptions) -> Request
 
 fn build_proxy_response(response: Response, options: &EnvOptions) -> Response {
     // ensure we have a present and valid content type
-    if let Some(content_type) = response.headers().get::<header::ContentType>() {
-        if !options.is_valid_content_type(content_type.type_().as_str()) {
+    if let Some(ct) = response.headers().get::<header::ContentType>() {
+        // FIXME: content type -> str stuff
+        // is pretty bananas with the mime type/subtype/suffix
+        // :shrug:
+        if !options.is_valid_content_type(&format!("{}", ct)) {
             return ProxyError::InvalidContentType.into();
         }
     } else {

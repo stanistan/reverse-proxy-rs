@@ -51,7 +51,8 @@ impl EnvOptions {
         }
     }
 
-    pub(crate) fn is_valid_content_type(&self, content_type: &str) -> bool {
-        true
+    #[inline]
+    pub(crate) fn is_valid_content_type(&self, ct: &str) -> bool {
+        self.mime_types.contains(ct)
     }
 }
