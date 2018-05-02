@@ -4,8 +4,10 @@ use hyper::client::HttpConnector;
 use hyper::header::Location;
 use std::sync::Arc;
 use std::str::FromStr;
-use super::{ProxyError, MAX_NUM_RETRIES, QUERY_PARAM};
+use super::ProxyError;
 use url::{form_urlencoded, Url};
+
+static QUERY_PARAM: &'static str = "q";
 
 /// Attempt to parse out the redirect uri from the proxy response.
 fn get_redirect_uri(response: &Response) -> Result<Uri, ProxyError> {
@@ -54,6 +56,7 @@ impl ProxyRequestState {
     pub(crate) fn process(
         self,
         client: Arc<Client<HttpConnector>>,
+        max_number_redirects: usize,
     ) -> Box<Future<Item = (Request, Response), Error = ::hyper::Error>> {
         use ProxyRequestState::*;
 
@@ -71,7 +74,7 @@ impl ProxyRequestState {
                 let mut response = Response::new();
                 response.set_status(StatusCode::BadRequest);
                 response.set_body(format!("{:?}", err));
-                ProxyRequestState::process(Done { request, response }, client)
+                ProxyRequestState::process(Done { request, response }, client, 0)
             }
             // The incoming request gets validated and we continue on.
             Incoming { request } => ProxyRequestState::process(
@@ -84,10 +87,11 @@ impl ProxyRequestState {
                     Ok(to) => Proxy {
                         request,
                         to,
-                        retries_remaining: MAX_NUM_RETRIES,
+                        retries_remaining: max_number_redirects,
                     },
                 },
                 client,
+                max_number_redirects,
             ),
             // We have followed redirects until we can no longer followed
             // redirects. :(
@@ -101,6 +105,7 @@ impl ProxyRequestState {
                     err: ProxyError::TooManyRedirects,
                 },
                 client,
+                max_number_redirects,
             ),
             // This is where we do the main processing of making the request
             // and actually acting as a proxy.
@@ -129,6 +134,7 @@ impl ProxyRequestState {
                                 _ => Done { request, response },
                             },
                             client,
+                            max_number_redirects,
                         )
                     },
                 );
