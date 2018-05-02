@@ -1,5 +1,6 @@
 extern crate futures;
 extern crate hyper;
+extern crate hyper_tls;
 extern crate net2;
 extern crate tokio_core;
 extern crate url;
@@ -9,6 +10,7 @@ use futures::stream::Stream;
 use hyper::client::HttpConnector;
 use hyper::server::{Http, Response, Service};
 use hyper::{Chunk, Client, Request};
+use hyper_tls::HttpsConnector;
 use net2::unix::UnixTcpBuilderExt;
 use net2::TcpBuilder;
 use std::sync::Arc;
@@ -32,8 +34,26 @@ enum ProxyError {
     BadRedirect,
 }
 
+struct ProxyClient {
+    http: Client<HttpConnector>,
+    https: Client<HttpsConnector<HttpConnector>>,
+}
+
+impl ProxyClient {
+    fn request(
+        &self,
+        request: Request,
+    ) -> Result<Box<Future<Item = Response, Error = hyper::Error>>, ProxyError> {
+        match request.uri().scheme() {
+            Some("https") => Ok(Box::new(self.https.request(request))),
+            Some("http") => Ok(Box::new(self.http.request(request))),
+            _ => Err(ProxyError::InvalidUrl),
+        }
+    }
+}
+
 struct ReverseProxy {
-    client: Arc<Client<HttpConnector>>,
+    client: Arc<ProxyClient>,
     options: Arc<EnvOptions>,
 }
 
@@ -70,7 +90,15 @@ fn serve(worker_id: usize, options: Arc<EnvOptions>) {
 
     let listener = TcpListener::from_listener(tcp, &options.addr, &server_handle).unwrap();
     let http: Http<Chunk> = Http::new();
-    let client = Arc::new(Client::configure().build(&client_handle));
+    let http_client = Client::configure().build(&client_handle);
+    let https_client = Client::configure()
+        .connector(HttpsConnector::new(4, &client_handle).unwrap())
+        .build(&client_handle);
+
+    let client = Arc::new(ProxyClient {
+        http: http_client,
+        https: https_client,
+    });
 
     println!("Starting worker {}", worker_id);
     core.run(listener.incoming().for_each(|(data, _addr)| {
@@ -80,7 +108,7 @@ fn serve(worker_id: usize, options: Arc<EnvOptions>) {
                 client: client.clone(),
                 options: options.clone(),
             },
-        ).map_err(|_| std::io::Error::last_os_error()) // FIXME wat
+        ).map_err(|_| std::io::Error::last_os_error()) // FIXME wat but furreal
     })).unwrap();
 }
 

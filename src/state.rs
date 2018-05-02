@@ -1,10 +1,9 @@
 use futures::future::Future;
-use hyper::{Client, Method, Request, Response, StatusCode, Uri};
-use hyper::client::HttpConnector;
+use hyper::{Method, Request, Response, StatusCode, Uri};
 use hyper::header;
 use std::sync::Arc;
 use std::str::FromStr;
-use super::{EnvOptions, ProxyError};
+use super::{EnvOptions, ProxyClient, ProxyError};
 use url::{form_urlencoded, Url};
 
 static QUERY_PARAM: &'static str = "q";
@@ -18,7 +17,6 @@ fn get_redirect_uri(response: &Response) -> Result<Uri, ProxyError> {
 }
 
 fn build_proxy_request(request: &Request, to: Uri, options: &EnvOptions) -> Request {
-
     /*
     let mut h = default_headers();
     h.set(header::UserAgent::new(options.user_agent.clone()));
@@ -29,24 +27,16 @@ fn build_proxy_request(request: &Request, to: Uri, options: &EnvOptions) -> Requ
     */
     Request::new(Method::Get, to)
 
-
-
-
-
-
     // unimplemented!()
-
 }
 
 fn build_proxy_response(response: Response, options: &EnvOptions) -> Response {
     response
-
 }
 
 fn get_mime_type_prefix(response: &Response) -> Result<(), ProxyError> {
     println!("{:?}", response.headers().get::<header::ContentType>());
     Ok(())
-
 }
 
 /// Attempt to extract the proxy target's URI from the original
@@ -87,7 +77,7 @@ impl ProxyRequestState {
     /// transitions until we get to `Done`.
     pub(crate) fn process(
         self,
-        client: Arc<Client<HttpConnector>>,
+        client: Arc<ProxyClient>,
         options: Arc<EnvOptions>,
     ) -> Box<Future<Item = (Request, Response), Error = ::hyper::Error>> {
         use ProxyRequestState::*;
@@ -149,28 +139,34 @@ impl ProxyRequestState {
                 retries_remaining,
             } => {
                 let next_request = build_proxy_request(&request, to, &options);
-                let work = client.request(next_request).and_then(
-                    move |response| {
-                        ProxyRequestState::process(
-                            match response.status().as_u16() {
-                                301 | 302 | 303 | 307 => match get_redirect_uri(&response) {
-                                    Ok(to) => Proxy {
-                                        request,
-                                        to,
-                                        retries_remaining: retries_remaining - 1,
+                match client.request(next_request) {
+                    Ok(request_future) => {
+                        let work = request_future.and_then(move |response| {
+                            ProxyRequestState::process(
+                                match response.status().as_u16() {
+                                    301 | 302 | 303 | 307 => match get_redirect_uri(&response) {
+                                        Ok(to) => Proxy {
+                                            request,
+                                            to,
+                                            retries_remaining: retries_remaining - 1,
+                                        },
+                                        Err(err) => Invalid { request, err },
                                     },
-                                    Err(err) => Invalid { request, err },
+                                    _ => Done {
+                                        request,
+                                        response: build_proxy_response(response, &options),
+                                    },
                                 },
-                                _ => {
-                                    Done { request, response: build_proxy_response(response, &options) }
-                                }
-                            },
-                            client,
-                            options,
-                        )
-                    },
-                );
-                Box::new(work)
+                                client,
+                                options,
+                            )
+                        });
+                        Box::new(work)
+                    }
+                    Err(err) => {
+                        ProxyRequestState::process(Invalid { request, err }, client, options)
+                    }
+                }
             }
         }
     }
