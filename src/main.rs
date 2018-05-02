@@ -17,6 +17,7 @@ use tokio_core::net::TcpListener;
 use tokio_core::reactor::Core;
 
 mod env_options;
+mod mime_types;
 mod state;
 
 use env_options::EnvOptions;
@@ -44,7 +45,7 @@ impl Service for ReverseProxy {
 
     fn call(&self, request: Request) -> Self::Future {
         let work = ProxyRequestState::Incoming { request }
-            .process(self.client.clone(), self.options.max_number_redirects)
+            .process(self.client.clone(), self.options.clone())
             .map(|(_, response)| response);
         Box::new(work)
     }
@@ -71,6 +72,7 @@ fn serve(worker_id: usize, options: Arc<EnvOptions>) {
     let http: Http<Chunk> = Http::new();
     let client = Arc::new(Client::configure().build(&client_handle));
 
+    println!("Starting worker {}", worker_id);
     core.run(listener.incoming().for_each(|(data, _addr)| {
         http.serve_connection(
             data,
@@ -83,8 +85,11 @@ fn serve(worker_id: usize, options: Arc<EnvOptions>) {
 }
 
 fn main() {
-    let options = Arc::new(EnvOptions::collect());
-    println!("Starting server with options: {:?}", options);
+    let options = Arc::new(EnvOptions::create());
+    println!(
+        "Starting server: num_threads={} max_number_redirects={} addr={}",
+        options.num_threads, options.max_number_redirects, options.addr
+    );
 
     for worker_id in 1..options.num_threads {
         let options = options.clone();

@@ -4,7 +4,7 @@ use hyper::client::HttpConnector;
 use hyper::header::Location;
 use std::sync::Arc;
 use std::str::FromStr;
-use super::ProxyError;
+use super::{EnvOptions, ProxyError};
 use url::{form_urlencoded, Url};
 
 static QUERY_PARAM: &'static str = "q";
@@ -56,7 +56,7 @@ impl ProxyRequestState {
     pub(crate) fn process(
         self,
         client: Arc<Client<HttpConnector>>,
-        max_number_redirects: usize,
+        options: Arc<EnvOptions>,
     ) -> Box<Future<Item = (Request, Response), Error = ::hyper::Error>> {
         use ProxyRequestState::*;
 
@@ -74,7 +74,7 @@ impl ProxyRequestState {
                 let mut response = Response::new();
                 response.set_status(StatusCode::BadRequest);
                 response.set_body(format!("{:?}", err));
-                ProxyRequestState::process(Done { request, response }, client, 0)
+                ProxyRequestState::process(Done { request, response }, client, options)
             }
             // The incoming request gets validated and we continue on.
             Incoming { request } => ProxyRequestState::process(
@@ -87,11 +87,11 @@ impl ProxyRequestState {
                     Ok(to) => Proxy {
                         request,
                         to,
-                        retries_remaining: max_number_redirects,
+                        retries_remaining: options.max_number_redirects,
                     },
                 },
                 client,
-                max_number_redirects,
+                options,
             ),
             // We have followed redirects until we can no longer followed
             // redirects. :(
@@ -105,7 +105,7 @@ impl ProxyRequestState {
                     err: ProxyError::TooManyRedirects,
                 },
                 client,
-                max_number_redirects,
+                options,
             ),
             // This is where we do the main processing of making the request
             // and actually acting as a proxy.
@@ -134,7 +134,7 @@ impl ProxyRequestState {
                                 _ => Done { request, response },
                             },
                             client,
-                            max_number_redirects,
+                            options,
                         )
                     },
                 );
