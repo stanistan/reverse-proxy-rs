@@ -11,19 +11,16 @@ use hyper::server::{Http, Response, Service};
 use hyper::{Chunk, Client, Request};
 use net2::unix::UnixTcpBuilderExt;
 use net2::TcpBuilder;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::thread;
 use tokio_core::net::TcpListener;
 use tokio_core::reactor::Core;
 
+mod env_options;
 mod state;
 
+use env_options::EnvOptions;
 use state::ProxyRequestState;
-
-static DEFAULT_MAX_REDIRECTS: usize = 4;
-static DEFAULT_PROXY_THREADS: usize = 4;
-static DEFAULT_PORT: usize = 3000;
 
 #[derive(Debug)]
 /// Describes the ways that the Proxy server can fail.
@@ -58,11 +55,12 @@ fn serve(worker_id: usize, options: Arc<EnvOptions>) {
     let server_handle = core.handle();
     let client_handle = core.handle();
 
+    let reuse = options.num_threads > 1;
     let tcp = TcpBuilder::new_v4()
         .unwrap()
-        .reuse_address(true)
+        .reuse_address(reuse)
         .unwrap()
-        .reuse_port(true)
+        .reuse_port(reuse)
         .unwrap()
         .bind(&options.addr)
         .unwrap()
@@ -82,46 +80,6 @@ fn serve(worker_id: usize, options: Arc<EnvOptions>) {
             },
         ).map_err(|_| std::io::Error::last_os_error()) // FIXME wat
     })).unwrap();
-}
-
-#[derive(Debug)]
-struct EnvOptions {
-    addr: SocketAddr,
-    num_threads: usize,
-    max_number_redirects: usize,
-}
-
-impl EnvOptions {
-    /// This function *will panic* if we couldn't parse
-    /// the environment correctly.
-    fn collect() -> EnvOptions {
-        use std::collections::HashMap;
-        let env_vars: HashMap<String, String> = std::env::vars().collect();
-        macro_rules! env {
-            ($k: expr, $d: expr) => {
-                env_vars.get(stringify!($k))
-                    .map(|v| v.parse().expect(&format!("Error parsing {}", stringify!($k))))
-                    .unwrap_or($d)
-            };
-            ($k: expr) => {
-                env!($k, "")
-            };
-        };
-
-        let port: usize = env!(PORT, DEFAULT_PORT);
-        let num_threads: usize = env!(NUM_THREADS, DEFAULT_PROXY_THREADS);
-        let max_number_redirects: usize = env!(MAX_REDIRECTS, DEFAULT_MAX_REDIRECTS);
-
-        let addr: SocketAddr = format!("127.0.0.1:{}", port)
-            .parse()
-            .expect("Erorr parsing socket address for PORT");
-
-        EnvOptions {
-            addr,
-            num_threads,
-            max_number_redirects,
-        }
-    }
 }
 
 fn main() {
