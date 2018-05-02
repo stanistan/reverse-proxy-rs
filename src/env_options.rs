@@ -5,12 +5,14 @@ use std::collections::HashSet;
 static DEFAULT_MAX_REDIRECTS: usize = 4;
 static DEFAULT_PROXY_THREADS: usize = 4;
 static DEFAULT_PORT: usize = 3000;
+static DEFAULT_USER_AGENT: &'static str = "stanistan";
 
 #[derive(Debug)]
 pub(crate) struct EnvOptions {
     pub addr: SocketAddr,
     pub num_threads: usize,
     pub max_number_redirects: usize,
+    pub user_agent: String,
     mime_types: HashSet<&'static str>,
 }
 
@@ -23,7 +25,7 @@ impl EnvOptions {
             ($k: expr, $d: expr) => {
                 env_vars.get(stringify!($k))
                     .map(|v| v.parse().expect(&format!("Error parsing {}", stringify!($k))))
-                    .unwrap_or($d)
+                    .unwrap_or_else(|| $d)
             };
         };
 
@@ -34,6 +36,8 @@ impl EnvOptions {
 
         let max_number_redirects: usize = env!(MAX_REDIRECTS, DEFAULT_MAX_REDIRECTS);
 
+        let user_agent: String = env!(USER_AGENT, DEFAULT_USER_AGENT.to_owned());
+
         let addr: SocketAddr = format!("127.0.0.1:{}", port)
             .parse()
             .expect("Erorr parsing socket address for PORT");
@@ -42,6 +46,7 @@ impl EnvOptions {
             addr,
             num_threads,
             max_number_redirects,
+            user_agent,
             mime_types: ::mime_types::MIME_TYPES.iter().map(|s| *s).collect(),
         }
     }

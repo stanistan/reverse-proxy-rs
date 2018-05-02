@@ -1,7 +1,7 @@
 use futures::future::Future;
 use hyper::{Client, Method, Request, Response, StatusCode, Uri};
 use hyper::client::HttpConnector;
-use hyper::header::Location;
+use hyper::header;
 use std::sync::Arc;
 use std::str::FromStr;
 use super::{EnvOptions, ProxyError};
@@ -11,10 +11,42 @@ static QUERY_PARAM: &'static str = "q";
 
 /// Attempt to parse out the redirect uri from the proxy response.
 fn get_redirect_uri(response: &Response) -> Result<Uri, ProxyError> {
-    let location: Option<&Location> = response.headers().get();
+    let location: Option<&header::Location> = response.headers().get();
     location
         .and_then(|l| Uri::from_str(&*l).ok())
         .ok_or_else(|| ProxyError::BadRedirect)
+}
+
+fn build_proxy_request(request: &Request, to: Uri, options: &EnvOptions) -> Request {
+
+    /*
+    let mut h = default_headers();
+    h.set(header::UserAgent::new(options.user_agent.clone()));
+    h.set(request.headers().get().cloned().unwrap_or(header::Accept::image()));
+    if let Some(encoding) = request.headers().get::<header::AcceptEncoding>() {
+        h.set(encoding.clone());
+    }
+    */
+    Request::new(Method::Get, to)
+
+
+
+
+
+
+    // unimplemented!()
+
+}
+
+fn build_proxy_response(response: Response, options: &EnvOptions) -> Response {
+    response
+
+}
+
+fn get_mime_type_prefix(response: &Response) -> Result<(), ProxyError> {
+    println!("{:?}", response.headers().get::<header::ContentType>());
+    Ok(())
+
 }
 
 /// Attempt to extract the proxy target's URI from the original
@@ -116,11 +148,12 @@ impl ProxyRequestState {
                 to,
                 retries_remaining,
             } => {
-                let work = client.request(Request::new(Method::Get, to)).and_then(
+                let next_request = build_proxy_request(&request, to, &options);
+                let work = client.request(next_request).and_then(
                     move |response| {
                         ProxyRequestState::process(
-                            match response.status().is_redirection() {
-                                true => match get_redirect_uri(&response) {
+                            match response.status().as_u16() {
+                                301 | 302 | 303 | 307 => match get_redirect_uri(&response) {
                                     Ok(to) => Proxy {
                                         request,
                                         to,
@@ -128,10 +161,9 @@ impl ProxyRequestState {
                                     },
                                     Err(err) => Invalid { request, err },
                                 },
-                                // TODO This should set the appropriate
-                                // response/caching headers on the response
-                                // that we want to send back out.
-                                _ => Done { request, response },
+                                _ => {
+                                    Done { request, response: build_proxy_response(response, &options) }
+                                }
                             },
                             client,
                             options,
