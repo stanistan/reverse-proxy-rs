@@ -76,17 +76,6 @@ fn build_proxy_request(request: &Request, to: Uri, opts: &EnvOptions) -> Request
 }
 
 fn build_proxy_response(response: Response, options: &EnvOptions) -> Response {
-    // ensure we have a present and valid content type
-    if let Some(ct) = response.headers().get::<header::ContentType>() {
-        // FIXME: content type -> str stuff
-        // is pretty bananas with the mime type/subtype/suffix
-        // :shrug:
-        if !options.is_valid_content_type(&format!("{}", ct)) {
-            return ProxyError::InvalidContentType.into();
-        }
-    } else {
-        return ProxyError::InvalidContentType.into();
-    }
 
     let headers = copy_headers!(response, default_headers(), {
         set [ ],
@@ -106,7 +95,26 @@ fn build_proxy_response(response: Response, options: &EnvOptions) -> Response {
             ])
         ]
     });
-    response.with_headers(headers)
+
+    let response = response.with_headers(headers);
+    if !response.status().is_success() {
+        return response;
+    }
+
+    // ensure we have a present and valid content type
+    if let Some(ct) = response.headers().get::<header::ContentType>() {
+        // FIXME: content type -> str stuff
+        // is pretty bananas with the mime type/subtype/suffix
+        // :shrug:
+        if !options.is_valid_content_type(&format!("{}", ct)) {
+            return ProxyError::InvalidContentType.into();
+        }
+    } else {
+        return ProxyError::InvalidContentType.into();
+    }
+
+    response
+
 }
 
 /// Attempt to extract the proxy target's URI from the original
