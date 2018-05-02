@@ -63,20 +63,15 @@ fn default_headers() -> header::Headers {
 
 fn build_proxy_request(request: &Request, to: Uri, opts: &EnvOptions) -> Request {
     let mut req = Request::new(Method::Get, to);
-    {
-        let h = copy_headers!(request, default_headers(), {
-            set [ header::UserAgent::new(opts.user_agent.clone()) ],
-            if_present [ header::AcceptEncoding ],
-            or_default [ header::Accept::image() ]
-        });
-        let req_headers = req.headers_mut();
-        *req_headers = h;
-    }
+    *req.headers_mut() = copy_headers!(request, default_headers(), {
+        set [ header::UserAgent::new(opts.user_agent.clone()) ],
+        if_present [ header::AcceptEncoding ],
+        or_default [ header::Accept::image() ]
+    });
     req
 }
 
 fn build_proxy_response(response: Response, options: &EnvOptions) -> Response {
-
     let headers = copy_headers!(response, default_headers(), {
         set [ ],
         if_present [
