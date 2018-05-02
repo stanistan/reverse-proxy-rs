@@ -50,4 +50,8 @@ impl EnvOptions {
             mime_types: ::mime_types::MIME_TYPES.iter().map(|s| *s).collect(),
         }
     }
+
+    pub(crate) fn is_valid_content_type(&self, content_type: &str) -> bool {
+        true
+    }
 }

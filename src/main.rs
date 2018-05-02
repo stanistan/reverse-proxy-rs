@@ -1,4 +1,5 @@
 extern crate futures;
+#[macro_use]
 extern crate hyper;
 extern crate hyper_tls;
 extern crate net2;
@@ -32,6 +33,16 @@ enum ProxyError {
     InvalidUrl,
     TooManyRedirects,
     BadRedirect,
+    InvalidContentType,
+}
+
+impl From<ProxyError> for Response {
+    fn from(err: ProxyError) -> Response {
+        let mut response = Response::new();
+        response.set_status(hyper::StatusCode::BadRequest);
+        response.set_body(format!("{:?}", err));
+        response
+    }
 }
 
 struct ProxyClient {
