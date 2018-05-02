@@ -157,7 +157,7 @@ impl ProxyRequestState {
         self,
         client: Arc<ProxyClient>,
         options: Arc<EnvOptions>,
-    ) -> Box<Future<Item = (Option<Request>, Response), Error = ::hyper::Error>> {
+    ) -> Box<Future<Item = (Request, Response), Error = ::hyper::Error>> {
         use ProxyRequestState::*;
 
         match self {
@@ -165,7 +165,7 @@ impl ProxyRequestState {
             // We have processed `Incoming` all the way through.
             Done { request, response } => {
                 println!("{} {}", request.uri(), response.status().as_u16());
-                Box::new(::futures::future::ok((Some(request), response)))
+                Box::new(::futures::future::ok((request, response)))
             }
             // An invalid state will be transformed into a response
             // to be output back to the user.
@@ -243,23 +243,23 @@ impl ProxyRequestState {
                 retries_remaining,
             } => match client.request(build_proxy_request(&request, to, &options)) {
                 Ok(request_future) => {
-                    // let r2 = request.clone();
                     Box::new(request_future
-                        .and_then(move |response| {
-                            ProxyRequestState::process(
-                                ProxyProcessing {
-                                    request,
-                                    response,
-                                    retries_remaining,
+                        .then(move |request_result| {
+                            ProxyRequestState::process(match request_result {
+                                    Ok(response) => ProxyProcessing {
+                                        request,
+                                        response,
+                                        retries_remaining,
+                                    },
+                                    Err(_) => Done {
+                                        request,
+                                        response: ProxyError::RequestFailed.into(),
+                                    },
                                 },
                                 client.clone(),
                                 options.clone(),
                             )
                         })
-                        .or_else(move |_|
-                            // FIXME
-                            Box::new(::futures::future::ok((None, ProxyError::RequestFailed.into())))
-                        )
                     )
                 },
                 Err(err) => ProxyRequestState::process(Invalid { request, err }, client, options),
