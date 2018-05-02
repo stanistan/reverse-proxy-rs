@@ -17,11 +17,15 @@ header! { (StrictTransportSecurity, "Strict-Transport-Security") => [String] }
 macro_rules! copy_headers {
     (
         $from: expr, $to: expr, {
+            set [ $($set:expr),* ],
             if_present [ $($t:ty),* ],
             or_default [ $($else:expr),* ]
         }
     ) => {{
         let mut to = $to;
+        $({
+            to.set($set);
+        })*
         $({
             to.set($from.headers().get().cloned().unwrap_or_else(|| $else));
         })*
@@ -43,27 +47,27 @@ fn get_redirect_uri(response: &Response) -> Result<Uri, ProxyError> {
 }
 
 fn default_headers() -> header::Headers {
-    let mut h = header::Headers::new();
-    h.set(XFrameOptions("deny".to_owned()));
-    h.set(XXSSProtection("1; mode=block".to_owned()));
-    h.set(XContentTypeOptions("nosniff".to_owned()));
-    h.set(ContentSecurityPolicy(
-        "default-src 'none'; img-src data:; style-src 'unsafe-inline'".to_owned(),
-    ));
-    h.set(StrictTransportSecurity(
-        "max-age=31536000; includeSubDomains".to_owned(),
-    ));
-    h
+    copy_headers!((), header::Headers::new(), {
+        set [
+            XFrameOptions("deny".to_owned()),
+            XXSSProtection("1; mode=block".to_owned()),
+            XContentTypeOptions("nosniff".to_owned()),
+            ContentSecurityPolicy("default-src 'none'; img-src data:; style-src 'unsafe-inline'".to_owned()),
+            StrictTransportSecurity("max-age=31536000; includeSubDomains".to_owned())
+        ],
+        if_present [ ],
+        or_default [ ]
+    })
 }
 
-fn build_proxy_request(request: &Request, to: Uri, options: &EnvOptions) -> Request {
+fn build_proxy_request(request: &Request, to: Uri, opts: &EnvOptions) -> Request {
     let mut req = Request::new(Method::Get, to);
     {
-        let mut h = copy_headers!(request, default_headers(), {
+        let h = copy_headers!(request, default_headers(), {
+            set [ header::UserAgent::new(opts.user_agent.clone()) ],
             if_present [ header::AcceptEncoding ],
             or_default [ header::Accept::image() ]
         });
-        h.set(header::UserAgent::new(options.user_agent.clone()));
         let req_headers = req.headers_mut();
         *req_headers = h;
     }
@@ -81,22 +85,23 @@ fn build_proxy_response(response: Response, options: &EnvOptions) -> Response {
     }
 
     let headers = copy_headers!(response, default_headers(), {
-            if_present [
-                header::ContentType,
-                header::ETag,
-                header::Expires,
-                header::LastModified,
-                header::ContentLength,
-                header::TransferEncoding,
-                header::ContentEncoding
-            ],
-            or_default [
-                header::CacheControl(vec![
-                    header::CacheDirective::Public,
-                    header::CacheDirective::MaxAge(31536000)
-                ])
-            ]
-        });
+        set [ ],
+        if_present [
+            header::ContentType,
+            header::ETag,
+            header::Expires,
+            header::LastModified,
+            header::ContentLength,
+            header::TransferEncoding,
+            header::ContentEncoding
+        ],
+        or_default [
+            header::CacheControl(vec![
+                header::CacheDirective::Public,
+                header::CacheDirective::MaxAge(31536000)
+            ])
+        ]
+    });
     response.with_headers(headers)
 }
 
