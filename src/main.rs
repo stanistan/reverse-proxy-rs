@@ -10,8 +10,8 @@ use hyper::client::HttpConnector;
 use hyper::header::Location;
 use hyper::server::{Http, Response, Service};
 use hyper::{Chunk, Client, Method, Request, StatusCode, Uri};
-use net2::TcpBuilder;
 use net2::unix::UnixTcpBuilderExt;
+use net2::TcpBuilder;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -23,6 +23,15 @@ use url::{form_urlencoded, Url};
 static QUERY_PARAM: &'static str = "q";
 static MAX_NUM_RETRIES: usize = 3;
 static PROXY_THREADS: usize = 4;
+
+#[derive(Debug)]
+/// Describes the ways that the Proxy server can fail.
+enum ProxyError {
+    NoQueryParameter,
+    InvalidUrl,
+    TooManyRedirects,
+    BadRedirect,
+}
 
 /// Describes the different states that the proxy
 /// service can be in. Each of the variants will contain
@@ -47,25 +56,36 @@ enum ProxyRequestState {
 }
 
 impl ProxyRequestState {
-    fn next(
+    /// Process the state. This function will recurse with state
+    /// transitions until we get to `Done`.
+    fn process(
         self,
         client: Arc<Client<HttpConnector>>,
     ) -> Box<Future<Item = (Request, Response), Error = hyper::Error>> {
         use ProxyRequestState::*;
 
         match self {
+            // This is the final state of the machine.
+            // We have processed `Incoming` all the way through.
             Done { request, response } => {
                 println!("{} {}", request.uri(), response.status().as_u16());
                 Box::new(futures::future::ok((request, response)))
             }
+            // An invalid state will be transformed into a response
+            // to be output back to the user.
             Invalid { request, err } => {
                 println!("proxy_error: {}: {:?}", request.uri(), err);
                 let mut response = Response::new();
                 response.set_status(StatusCode::BadRequest);
                 response.set_body(format!("{:?}", err));
-                ProxyRequestState::next(Done { request, response }, client)
+                ProxyRequestState::process(Done { request, response }, client)
             }
-            Incoming { request } => ProxyRequestState::next(
+            // The incoming request gets validated and we continue on.
+            Incoming { request } => ProxyRequestState::process(
+                // TODO this should probably be creating a new request?
+                // we need to set headers correctly (including user-agent)
+                // for when we make the proxy request in the `Proxy`
+                // state.
                 match get_target_uri(&request) {
                     Err(err) => Invalid { request, err },
                     Ok(to) => Proxy {
@@ -76,17 +96,23 @@ impl ProxyRequestState {
                 },
                 client,
             ),
+            // We have followed redirects until we can no longer followed
+            // redirects. :(
             Proxy {
                 request,
                 to: _,
                 retries_remaining: 0,
-            } => ProxyRequestState::next(
+            } => ProxyRequestState::process(
                 Invalid {
                     request: request,
                     err: ProxyError::TooManyRedirects,
                 },
                 client,
             ),
+            // This is where we do the main processing of making the request
+            // and actually acting as a proxy.
+            //
+            // This can loop back into itself as we follow redirects.
             Proxy {
                 request,
                 to,
@@ -94,7 +120,7 @@ impl ProxyRequestState {
             } => {
                 let work = client.request(Request::new(Method::Get, to)).and_then(
                     move |response| {
-                        ProxyRequestState::next(
+                        ProxyRequestState::process(
                             match response.status().is_redirection() {
                                 true => match get_redirect_uri(&response) {
                                     Ok(to) => Proxy {
@@ -104,6 +130,9 @@ impl ProxyRequestState {
                                     },
                                     Err(err) => Invalid { request, err },
                                 },
+                                // TODO This should set the appropriate
+                                // response/caching headers on the response
+                                // that we want to send back out.
                                 _ => Done { request, response },
                             },
                             client,
@@ -114,14 +143,6 @@ impl ProxyRequestState {
             }
         }
     }
-}
-
-#[derive(Debug)]
-enum ProxyError {
-    NoQueryParameter,
-    InvalidUrl,
-    TooManyRedirects,
-    BadRedirect,
 }
 
 struct ReverseProxy {
@@ -136,7 +157,7 @@ impl Service for ReverseProxy {
 
     fn call(&self, request: Request) -> Self::Future {
         let work = ProxyRequestState::Incoming { request }
-            .next(self.client.clone())
+            .process(self.client.clone())
             .map(|(_, response)| response);
         Box::new(work)
     }
@@ -166,19 +187,28 @@ fn serve(worker_id: usize, addr: SocketAddr) {
     let server_handle = core.handle();
     let client_handle = core.handle();
 
-    let tcp = TcpBuilder::new_v4().unwrap()
-        .reuse_address(true).unwrap()
-        .reuse_port(true).unwrap()
-        .bind(addr).unwrap()
-        .listen(128).unwrap();
+    let tcp = TcpBuilder::new_v4()
+        .unwrap()
+        .reuse_address(true)
+        .unwrap()
+        .reuse_port(true)
+        .unwrap()
+        .bind(addr)
+        .unwrap()
+        .listen(128)
+        .unwrap();
 
     let listener = TcpListener::from_listener(tcp, &addr, &server_handle).unwrap();
     let http: Http<Chunk> = Http::new();
     let client = Arc::new(Client::configure().build(&client_handle));
 
     core.run(listener.incoming().for_each(|(data, _addr)| {
-        http.serve_connection(data, ReverseProxy{client: client.clone()})
-            .map_err(|_| std::io::Error::last_os_error()) // FIXME wat
+        http.serve_connection(
+            data,
+            ReverseProxy {
+                client: client.clone(),
+            },
+        ).map_err(|_| std::io::Error::last_os_error()) // FIXME wat
     })).unwrap();
 }
 
