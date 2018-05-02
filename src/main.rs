@@ -176,7 +176,7 @@ fn get_redirect_uri(response: &Response) -> Result<Uri, ProxyError> {
 fn get_target_uri(request: &Request) -> Result<Uri, ProxyError> {
     let query = request.query().ok_or_else(|| ProxyError::NoQueryParameter)?;
     let (_, query_param) = form_urlencoded::parse(query.as_bytes())
-        .find(|(k, _)| k == QUERY_PARAM)
+        .find(|&(ref k, _)| k == QUERY_PARAM)
         .ok_or_else(|| ProxyError::NoQueryParameter)?;
     let url = Url::parse(&query_param).map_err(|_| ProxyError::InvalidUrl)?;
     Uri::from_str(url.as_str()).map_err(|_| ProxyError::InvalidUrl)
