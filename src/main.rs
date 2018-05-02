@@ -34,6 +34,7 @@ enum ProxyError {
     TooManyRedirects,
     BadRedirect,
     InvalidContentType,
+    RequestFailed,
 }
 
 impl From<ProxyError> for Response {
