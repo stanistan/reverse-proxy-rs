@@ -24,7 +24,7 @@ mod mime_types;
 mod state;
 
 use env_options::EnvOptions;
-use state::ProxyRequestState;
+use state::{handle_proxy_request};
 
 #[derive(Debug)]
 /// Describes the ways that the Proxy server can fail.
@@ -76,10 +76,7 @@ impl Service for ReverseProxy {
     type Future = Box<Future<Item = Response, Error = hyper::Error>>;
 
     fn call(&self, request: Request) -> Self::Future {
-        let work = ProxyRequestState::Incoming { request }
-            .process(self.client.clone(), self.options.clone())
-            .map(|(_, response)| response);
-        Box::new(work)
+        Box::new(handle_proxy_request(self.client.clone(), self.options.clone(), request))
     }
 }
 

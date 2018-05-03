@@ -123,147 +123,52 @@ fn get_target_uri(request: &Request) -> Result<Uri, ProxyError> {
     Uri::from_str(url.as_str()).map_err(|_| ProxyError::InvalidUrl)
 }
 
-/// Describes the different states that the proxy
-/// service can be in. Each of the variants will contain
-/// the initial request so we can do tracing/logging/debugging.
-pub(crate) enum ProxyRequestState {
-    Incoming {
-        request: Request,
-    },
-    Invalid {
-        request: Request,
-        err: ProxyError,
-    },
-    Done {
-        request: Request,
-        response: Response,
-    },
-    Proxy {
-        request: Request,
-        to: Uri,
-        retries_remaining: usize,
-    },
-    ProxyProcessing {
-        request: Request,
-        response: Response,
-        retries_remaining: usize,
-    },
-}
-
-impl ProxyRequestState {
-    /// Process the state. This function will recurse with state
-    /// transitions until we get to `Done`.
-    pub(crate) fn process(
-        self,
-        client: Arc<ProxyClient>,
-        options: Arc<EnvOptions>,
-    ) -> Box<Future<Item = (Request, Response), Error = ::hyper::Error>> {
-        use ProxyRequestState::*;
-
-        match self {
-            // This is the final state of the machine.
-            // We have processed `Incoming` all the way through.
-            Done { request, response } => {
-                println!("{} {}", request.uri(), response.status().as_u16());
-                Box::new(::futures::future::ok((request, response)))
-            }
-            // An invalid state will be transformed into a response
-            // to be output back to the user.
-            Invalid { request, err } => {
-                println!("proxy_error: {}: {:?}", request.uri(), err);
-                let response = err.into();
-                ProxyRequestState::process(Done { request, response }, client, options)
-            }
-            // The incoming request gets validated and we continue on.
-            Incoming { request } => ProxyRequestState::process(
-                // TODO this should probably be creating a new request?
-                // we need to set headers correctly (including user-agent)
-                // for when we make the proxy request in the `Proxy`
-                // state.
-                match get_target_uri(&request) {
-                    Err(err) => Invalid { request, err },
-                    Ok(to) => Proxy {
-                        request,
-                        to,
-                        retries_remaining: options.max_number_redirects,
-                    },
-                },
-                client,
-                options,
-            ),
-            // State during which we are processing the response from
-            // the proxy.
-            ProxyProcessing {
-                request,
-                response,
-                retries_remaining,
-            } => ProxyRequestState::process(
-                match response.status().as_u16() {
-                    301 | 302 | 303 | 307 => match get_redirect_uri(&response) {
-                        Err(err) => Invalid { request, err },
-                        Ok(to) => Proxy {
-                            request,
-                            to,
-                            retries_remaining: retries_remaining - 1,
-                        },
-                    },
-                    /*304 => Done {
-                        request,
-                        response: build_proxy_response_no_body(response, &options),
-                    },*/
-                    _ => Done {
-                        request,
-                        response: build_proxy_response(response, &options),
-                    },
-                },
-                client,
-                options,
-            ),
-            // We have followed redirects until we can no longer followed
-            // redirects. :(
-            Proxy {
-                request,
-                to: _,
-                retries_remaining: 0,
-            } => ProxyRequestState::process(
-                Invalid {
-                    request: request,
-                    err: ProxyError::TooManyRedirects,
-                },
-                client,
-                options,
-            ),
-            // This is where we do the main processing of making the request
-            // and actually acting as a proxy.
-            //
-            // This can loop back into itself as we follow redirects.
-            Proxy {
-                request,
-                to,
-                retries_remaining,
-            } => match client.request(build_proxy_request(&request, to, &options)) {
-                Ok(request_future) => {
-                    Box::new(request_future
-                        .then(move |request_result| {
-                            ProxyRequestState::process(match request_result {
-                                    Ok(response) => ProxyProcessing {
-                                        request,
-                                        response,
-                                        retries_remaining,
-                                    },
-                                    Err(_) => Done {
-                                        request,
-                                        response: ProxyError::RequestFailed.into(),
-                                    },
-                                },
-                                client.clone(),
-                                options.clone(),
-                            )
-                        })
-                    )
-                },
-                Err(err) => ProxyRequestState::process(Invalid { request, err }, client, options),
-            },
+macro_rules! proxy_try {
+    ( $result: expr ) => {
+        match $result {
+            Err(err) => return wrap(err),
+            Ok(val) => val,
         }
     }
+}
+
+#[inline]
+fn wrap<T>(t: T) -> Box<Future<Item = Response, Error = ::hyper::Error>>
+where T: Into<Response>  {
+    Box::new(::futures::future::ok(t.into()))
+}
+
+/// Handle the initial proxy request from a client. Returns a future that contains
+/// the response to the initial request.
+pub(crate) fn handle_proxy_request(client: Arc<ProxyClient>, options: Arc<EnvOptions>, request: Request) -> Box<Future<Item = Response, Error = ::hyper::Error>> {
+    // TODO(benl): check method and path and stuff
+    let target_uri = proxy_try!(get_target_uri(&request));
+    let redirects = options.max_number_redirects;
+    proxy_it(client, options, request, target_uri, redirects)
+}
+
+/// Handles a request to make a proxy request to an upstream URI. Returns a
+/// future for making that request and transforming the response into a
+/// response back to the original client.
+fn proxy_it(client: Arc<ProxyClient>, options: Arc<EnvOptions>, request: Request, to: Uri, retries_remaining: usize) -> Box<Future<Item = Response, Error = ::hyper::Error>> {
+    let upstream_request = proxy_try!(client.request(build_proxy_request(&request, to, &options)));
+    let work = upstream_request.then(move |upstream_result| {
+        match upstream_result {
+            Err(_) => wrap(ProxyError::RequestFailed),
+            Ok(response) => {
+                match response.status().as_u16() {
+                    // if it's a redirect and we're outta patience, return an erro
+                    301 | 302 | 303 | 307 if retries_remaining == 0 => wrap(ProxyError::TooManyRedirects),
+                    // if it's a redirect, try to do it
+                    301 | 302 | 303 | 307 => match get_redirect_uri(&response) {
+                        Err(proxy_err) => wrap(proxy_err),
+                        Ok(next_uri) => proxy_it(client, options, request, next_uri, retries_remaining - 1),
+                    },
+                    // otherwise, cleanup the response and return it
+                   _ => wrap(build_proxy_response(response, &options)),
+                }
+            },
+        }
+    });
+    Box::new(work)
 }
