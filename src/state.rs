@@ -1,9 +1,9 @@
-use futures::future::Future;
-use hyper::{Method, Request, Response, Uri};
-use hyper::header;
-use std::sync::Arc;
-use std::str::FromStr;
 use super::{EnvOptions, ProxyClient, ProxyError};
+use futures::future::Future;
+use hyper::header;
+use hyper::{Method, Request, Response, Uri};
+use std::str::FromStr;
+use std::sync::Arc;
 use url::{form_urlencoded, Url};
 
 static QUERY_PARAM: &'static str = "q";
@@ -109,7 +109,6 @@ fn build_proxy_response(response: Response, options: &EnvOptions) -> Response {
     }
 
     response
-
 }
 
 /// Attempt to extract the proxy target's URI from the original
@@ -124,23 +123,29 @@ fn get_target_uri(request: &Request) -> Result<Uri, ProxyError> {
 }
 
 macro_rules! proxy_try {
-    ( $result: expr ) => {
+    ($result:expr) => {
         match $result {
             Err(err) => return wrap(err),
             Ok(val) => val,
         }
-    }
+    };
 }
 
 #[inline]
 fn wrap<T>(t: T) -> Box<Future<Item = Response, Error = ::hyper::Error>>
-where T: Into<Response>  {
+where
+    T: Into<Response>,
+{
     Box::new(::futures::future::ok(t.into()))
 }
 
 /// Handle the initial proxy request from a client. Returns a future that contains
 /// the response to the initial request.
-pub(crate) fn handle_proxy_request(client: Arc<ProxyClient>, options: Arc<EnvOptions>, request: Request) -> Box<Future<Item = Response, Error = ::hyper::Error>> {
+pub(crate) fn handle_proxy_request(
+    client: Arc<ProxyClient>,
+    options: Arc<EnvOptions>,
+    request: Request,
+) -> Box<Future<Item = Response, Error = ::hyper::Error>> {
     // TODO(benl): check method and path and stuff
     let target_uri = proxy_try!(get_target_uri(&request));
     let redirects = options.max_number_redirects;
@@ -150,24 +155,36 @@ pub(crate) fn handle_proxy_request(client: Arc<ProxyClient>, options: Arc<EnvOpt
 /// Handles a request to make a proxy request to an upstream URI. Returns a
 /// future for making that request and transforming the response into a
 /// response back to the original client.
-fn proxy_it(client: Arc<ProxyClient>, options: Arc<EnvOptions>, request: Request, to: Uri, retries_remaining: usize) -> Box<Future<Item = Response, Error = ::hyper::Error>> {
-    let upstream_request = proxy_try!(client.request(build_proxy_request(&request, to, &options)));
+fn proxy_it(
+    client: Arc<ProxyClient>,
+    options: Arc<EnvOptions>,
+    request: Request,
+    to: Uri,
+    retries_remaining: usize,
+) -> Box<Future<Item = Response, Error = ::hyper::Error>> {
+    let upstream_request = proxy_try!{
+        client.request(build_proxy_request(&request, to, &options))
+    };
     let work = upstream_request.then(move |upstream_result| {
         match upstream_result {
             Err(_) => wrap(ProxyError::RequestFailed),
             Ok(response) => {
                 match response.status().as_u16() {
                     // if it's a redirect and we're outta patience, return an erro
-                    301 | 302 | 303 | 307 if retries_remaining == 0 => wrap(ProxyError::TooManyRedirects),
+                    301 | 302 | 303 | 307 if retries_remaining == 0 => {
+                        wrap(ProxyError::TooManyRedirects)
+                    }
                     // if it's a redirect, try to do it
                     301 | 302 | 303 | 307 => match get_redirect_uri(&response) {
                         Err(proxy_err) => wrap(proxy_err),
-                        Ok(next_uri) => proxy_it(client, options, request, next_uri, retries_remaining - 1),
+                        Ok(next_uri) => {
+                            proxy_it(client, options, request, next_uri, retries_remaining - 1)
+                        }
                     },
                     // otherwise, cleanup the response and return it
-                   _ => wrap(build_proxy_response(response, &options)),
+                    _ => wrap(build_proxy_response(response, &options)),
                 }
-            },
+            }
         }
     });
     Box::new(work)
